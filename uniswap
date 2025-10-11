@@ -1,0 +1,189 @@
+import json
+from web3 import Web3
+from web3.middleware import geth_poa_middleware
+
+# Configuration
+RPC_URL = 'https://mainnet.base.org'  # Public RPC for Base
+CHAIN_ID = 8453
+PRIVATE_KEY = 'YOUR_PRIVATE_KEY_HERE'  # WARNING: Use a test wallet! Never commit real keys.
+WALLET_ADDRESS = 'YOUR_WALLET_ADDRESS_HERE'
+
+UNISWAP_ROUTER_ADDRESS = '0x2626664c2603336E57B271c5C0b26F421741e481'  # SwapRouter02 on Base
+QUOTER_ADDRESS = '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a'  # QuoterV2 on Base
+WETH_ADDRESS = '0x4200000000000000000000000000000000000006'
+
+# Minimal ABI for Uniswap SwapRouter02
+ROUTER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "tokenIn", "type": "address"},
+                    {"internalType": "address", "name": "tokenOut", "type": "address"},
+                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                    {"internalType": "address", "name": "recipient", "type": "address"},
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"},
+                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}
+                ],
+                "internalType": "struct ISwapRouter02.ExactInputSingleParams",
+                "name": "params",
+                "type": "tuple"
+            }
+        ],
+        "name": "exactInputSingle",
+        "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+        "stateMutability": "payable",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "amountMinimum", "type": "uint256"},
+                   {"internalType": "address", "name": "recipient", "type": "address"}],
+        "name": "unwrapWETH9",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function"
+    }
+]
+
+# Minimal ABI for QuoterV2
+QUOTER_ABI = [
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"internalType": "address", "name": "tokenIn", "type": "address"},
+                    {"internalType": "address", "name": "tokenOut", "type": "address"},
+                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}
+                ],
+                "internalType": "struct IQuoterV2.QuoteExactInputSingleParams",
+                "name": "params",
+                "type": "tuple"
+            }
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            {"internalType": "uint256", "name": "amountOut", "type": "uint256"},
+            {"internalType": "uint160", "name": "sqrtPriceX96After", "type": "uint160"},
+            {"internalType": "uint32", "name": "initializedTicksCrossed", "type": "uint32"},
+            {"internalType": "uint256", "name": "gasEstimate", "type": "uint256"}
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+]
+
+# Minimal ERC20 ABI for approve and balance
+ERC20_ABI = [
+    {
+        "constant": False,
+        "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    }
+]
+
+# Connect to Base network
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
+w3.middleware_onion.inject(geth_poa_middleware, layer=0)  # For L2 chains like Base
+
+# Load account
+account = w3.eth.account.from_key(PRIVATE_KEY)
+
+def get_quote(token_in, token_out, amount_in, fee=3000):
+    quoter = w3.eth.contract(address=QUOTER_ADDRESS, abi=QUOTER_ABI)
+    params = {
+        'tokenIn': token_in,
+        'tokenOut': token_out,
+        'amountIn': amount_in,
+        'fee': fee,
+        'sqrtPriceLimitX96': 0
+    }
+    amount_out, _, _, _ = quoter.functions.quoteExactInputSingle(params).call()
+    return amount_out
+
+def approve_token(token_address, amount):
+    token = w3.eth.contract(address=token_address, abi=ERC20_ABI)
+    tx = token.functions.approve(UNISWAP_ROUTER_ADDRESS, amount).build_transaction({
+        'from': WALLET_ADDRESS,
+        'gas': 100000,
+        'gasPrice': w3.to_wei('1', 'gwei'),
+        'nonce': w3.eth.get_transaction_count(WALLET_ADDRESS),
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    w3.eth.wait_for_transaction_receipt(tx_hash)
+    print(f"Approved {amount} of token {token_address}")
+
+def buy_token(token_address, amount_eth, fee=3000, slippage=1):
+    amount_in = w3.to_wei(amount_eth, 'ether')
+    token_in = WETH_ADDRESS
+    token_out = token_address
+    amount_out_min = get_quote(token_in, token_out, amount_in, fee) * (100 - slippage) // 100
+
+    router = w3.eth.contract(address=UNISWAP_ROUTER_ADDRESS, abi=ROUTER_ABI)
+    params = {
+        'tokenIn': token_in,
+        'tokenOut': token_out,
+        'fee': fee,
+        'recipient': WALLET_ADDRESS,
+        'amountIn': amount_in,
+        'amountOutMinimum': amount_out_min,
+        'sqrtPriceLimitX96': 0
+    }
+    tx = router.functions.exactInputSingle(params).build_transaction({
+        'from': WALLET_ADDRESS,
+        'value': amount_in,  # Send ETH
+        'gas': 300000,
+        'gasPrice': w3.to_wei('1', 'gwei'),
+        'nonce': w3.eth.get_transaction_count(WALLET_ADDRESS),
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    print(f"Buy transaction hash: {tx_hash.hex()}")
+
+def sell_token(token_address, amount_token, fee=3000, slippage=1):
+    token_in = token_address
+    token_out = WETH_ADDRESS
+    approve_token(token_in, amount_token)
+    amount_out_min = get_quote(token_in, token_out, amount_token, fee) * (100 - slippage) // 100
+
+    router = w3.eth.contract(address=UNISWAP_ROUTER_ADDRESS, abi=ROUTER_ABI)
+    params = {
+        'tokenIn': token_in,
+        'tokenOut': token_out,
+        'fee': fee,
+        'recipient': UNISWAP_ROUTER_ADDRESS,  # Send to router to unwrap
+        'amountIn': amount_token,
+        'amountOutMinimum': amount_out_min,
+        'sqrtPriceLimitX96': 0
+    }
+    multicall_data = [
+        router.functions.exactInputSingle(params).data,
+        router.functions.unwrapWETH9(0, WALLET_ADDRESS).data  # Unwrap all
+    ]
+    tx = router.functions.multicall(multicall_data).build_transaction({
+        'from': WALLET_ADDRESS,
+        'gas': 400000,
+        'gasPrice': w3.to_wei('1', 'gwei'),
+        'nonce': w3.eth.get_transaction_count(WALLET_ADDRESS),
+    })
+    signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    print(f"Sell transaction hash: {tx_hash.hex()}")
+
+# Example usage
+# buy_token('TOKEN_ADDRESS_HERE', 0.1)  # Buy with 0.1 ETH
+# sell_token('TOKEN_ADDRESS_HERE', w3.to_wei(100, 'ether'))  # Sell 100 tokens (adjust decimals)
