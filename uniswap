@@ -187,3 +187,6 @@ def sell_token(token_address, amount_token, fee=3000, slippage=1):
 # Example usage
 # buy_token('TOKEN_ADDRESS_HERE', 0.1)  # Buy with 0.1 ETH
 # sell_token('TOKEN_ADDRESS_HERE', w3.to_wei(100, 'ether'))  # Sell 100 tokens (adjust decimals)
+
+
+end
